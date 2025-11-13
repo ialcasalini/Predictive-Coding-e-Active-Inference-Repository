@@ -1,0 +1,317 @@
+import numpy as np
+from tqdm import tqdm_notebook as tqdm
+from matplotlib import pyplot as plt
+import torch
+from torch import nn
+import pickle as pk
+import wandb
+import psutil
+import time
+import os
+import scipy.io as sio
+
+# Inizializza run di wandb
+wandb.init(project="handwriting-robot-PC", name="run-singola-cella-handwriting-robot-PC")
+
+# Misura RAM, CPU, tempo prima
+process = psutil.Process(os.getpid())
+ram_before = process.memory_info().rss / (1024 ** 2)  # in MB
+cpu_before = psutil.cpu_percent(interval=None)
+t0 = time.time()
+
+class RNN(nn.Module):
+
+    def __init__(self, states_dim, causes_dim, output_dim, factor_dim, tau):
+        super(RNN, self).__init__()
+
+        self.states_dim = states_dim
+        self.causes_dim = causes_dim
+        self.output_dim = output_dim
+        self.factor_dim = factor_dim
+
+        # Time constant of the RNN
+        self.tau = tau
+
+        # Output weights initialization
+        self.w_o = torch.randn(self.states_dim, self.output_dim) * 5 / self.states_dim
+
+        # Recurrent weights factorization
+        self.w_pd = torch.randn(self.states_dim, self.factor_dim) * 0.2 / np.sqrt(self.factor_dim)
+        self.w_fd = self.w_pd.clone()
+        self.w_cd = torch.nn.Softmax(1)(0.5*torch.randn(self.causes_dim, self.factor_dim))*self.factor_dim
+        self.w_pd += torch.randn_like(self.w_pd) / np.sqrt(self.factor_dim)
+        self.w_fd += torch.randn_like(self.w_fd) / np.sqrt(self.factor_dim)
+
+        # Predictions, states and errors are temporarily stored for batch learning
+        # Learning can be performed online, but computations are slower
+        self.x_pred = None
+        self.error = None
+        self.h_prior = None
+        self.h_post = None
+        self.s = None
+
+    def forward(self, x, c_init, h_init=0, lr_c=0.2, lr_h=0.2):
+        """
+        Pass through the network : forward (prediction) and backward (inference) passes are
+         performed at the same time. Online learning could be performed here, but to improve
+         computations speed, we use the seq_len as a batch dimension in a separate function.
+        Parameters :
+        - x : target sequences, Tensor of shape (seq_len, batch_size, output_dim)
+        - c_init : causes of the sequences, Tensor of shape (batch_size, causes_dim)
+        - h_init : states of the sequences, Tensor of shape (batch_size, states_dim)
+        - lr_c : learning rate associated with the hidden causes, double
+        - le_h : learning rate associated with the hidden state, double
+        """
+
+
+        seq_len, batch_size, _ = x.shape
+
+        # Temporary storing of the predictions, states and errors
+        x_pred = torch.zeros_like(x)
+        h_prior = torch.zeros(seq_len, batch_size, self.states_dim)
+        h_post = torch.zeros(seq_len, batch_size, self.states_dim)
+        c = torch.zeros(seq_len+1, batch_size, self.causes_dim)
+        error_h = torch.zeros(seq_len, batch_size, self.states_dim)
+        error = torch.zeros_like(x)
+
+        # Initial hidden state and hidden causes
+        c[0] = c_init
+        old_h_post = h_init
+
+        for t in range(seq_len):
+
+            # Top-down pass - PREDIZIONE
+
+            # Compute h_prior according to past h_post and c
+            h_prior[t] = (1-1/self.tau) * old_h_post + (1/self.tau) * torch.mm(
+                torch.mm(
+                    torch.tanh(old_h_post),
+                    self.w_pd
+                ) * torch.mm(
+                    c[t],
+                    self.w_cd
+                ),
+                self.w_fd.T
+            )
+
+            # Compute x_pred according to h_prior
+            x_pred[t] =  torch.mm(torch.tanh(h_prior[t]), self.w_o)
+
+            # Bottom-up pass - INFERENZA
+
+            # Compute the error on the sensory level
+            error[t] = x_pred[t] - x[t]
+
+            # Infer h_post according to h_prior and the error on the sensory level
+            h_post[t] = h_prior[t] - (1-torch.tanh(h_prior[t])**2)*lr_h*torch.mm(error[t], self.w_o.T)
+
+            # Compute the error on the hidden state level
+            error_h[t] = h_prior[t] - h_post[t]
+
+            # Infer c according to its past value and the error on the hidden state level
+            c[t+1] = c[t] - lr_c*torch.mm(
+                torch.mm(
+                    torch.tanh(old_h_post),
+                    self.w_pd
+                )* torch.mm(
+                    error_h[t],
+                    self.w_fd
+                ),
+                self.w_cd.T
+            )
+
+            old_h_post = h_post[t]
+
+        self.x_pred = x_pred
+        self.error = error
+        self.error_h = error_h
+        self.h_prior = h_prior
+        self.h_post = h_post
+        self.c = c
+
+    def learn(self, lr_o, lr_r):
+        """
+        Performs learning of the RNN weights. For computational efficieny, sequence length and
+         batch size are merged into a single batch dimension in the following computations
+        Parameters :
+        - lr_o : Learning rate for the output weights
+        - lr_r : Learning rate for the recurrent weights
+        """
+
+
+        seq_len, batch_size, _ = self.x_pred.shape
+
+        # APPRENDIMENTO LOCALE DEI PESI
+        grad_o = lr_o * torch.mean(
+            torch.bmm(
+                torch.tanh(self.h_prior.reshape(seq_len * batch_size, self.states_dim, 1)),
+                self.error.reshape(seq_len * batch_size, 1, self.output_dim)
+            ),
+            axis=0
+        )
+
+        self.w_o -= grad_o
+
+        nbatch = (seq_len-1)*batch_size
+
+        # Recurrent weights
+        grad_pd = lr_r * torch.mean(
+            torch.bmm(
+                torch.tanh(self.h_post[:-1]).reshape(nbatch, self.states_dim, 1),
+                (
+                    torch.mm(
+                        self.error_h[1:].reshape(nbatch, self.states_dim),
+                        self.w_fd
+                    ) * \
+                    torch.mm(
+                        self.c[1:-1].reshape(nbatch, self.causes_dim),
+                        self.w_cd
+                    )
+                ).reshape(nbatch, 1, self.factor_dim)
+            ),
+            axis=0
+        )
+
+        self.w_pd -= grad_pd
+
+        grad_cd = lr_r * torch.mean(
+            torch.bmm(
+                self.c[1:-1].reshape(nbatch, self.causes_dim, 1),
+                (
+                    torch.mm(
+                        self.error_h[1:].reshape(nbatch, self.states_dim),
+                        self.w_fd
+                    ) * \
+                    torch.mm(
+                        torch.tanh(self.h_post[:-1]).reshape(nbatch, self.states_dim),
+                        self.w_pd
+                    )
+                ).reshape(nbatch, 1, self.factor_dim)
+            ),
+            axis=0
+        )
+        self.w_cd -= grad_cd
+
+        grad_fd = lr_r * torch.mean(
+            torch.bmm(
+                self.error_h[1:].reshape(nbatch, self.states_dim, 1),
+                (
+                    torch.mm(
+                        torch.tanh(self.h_post[:-1]).reshape(nbatch, self.states_dim),
+                        self.w_pd
+                    ) * \
+                    torch.mm(
+                        self.c[1:-1].reshape(nbatch, self.causes_dim),
+                        self.w_cd
+                    )
+                ).reshape(nbatch, 1, self.factor_dim)
+            ),
+            axis=0
+        )
+
+        self.w_fd -= grad_fd
+
+from google.colab import files
+trajectories = files.upload()
+
+# Loading and preprocessing of the dataset
+trajectories = sio.loadmat('mixoutALL_shifted.mat')['mixout'][0]
+trajectories = [trajectory[:, np.sum(np.abs(trajectory), 0) > 1e-3] for trajectory in trajectories]
+trajectories = [np.cumsum(trajectory, axis=-1) for trajectory in trajectories]
+
+# Normalize dataset trajectory length
+traj_len = 60
+normalized_trajectories = np.zeros((len(trajectories), 2, traj_len))
+for i, traj in enumerate(trajectories):
+    tlen = traj.shape[1]
+    for t in range(traj_len):
+        normalized_trajectories[i, :, t] = traj[:2, int(t*tlen/traj_len)]
+
+# Rescale the trajectories
+trajectories = normalized_trajectories/10
+
+# Index ranges corresponding to the three first classes (a, b, c)
+labels_range = np.zeros((3, 2))
+labels_range[0] = np.array([0, 97])
+labels_range[1] = np.array([97, 170])
+labels_range[2] = np.array([170, 225])
+
+# Number of training iterations
+iterations = 2000
+
+# Number of trajectory classes
+p = 3
+
+# Dimension of the RNN hidden state
+states_dim = 100
+batch_size = p * 20
+
+# Select 20 trajectories per class for training (20 other will be used for testing)
+traj = torch.cat([
+    torch.Tensor(trajectories[int(labels_range[k][0]):int(labels_range[k][0])+20])
+    for k in range(p)
+]).transpose(1, 2).transpose(0, 1)
+
+# Initialize the RNN
+rnn = RNN(states_dim=states_dim, causes_dim=p, output_dim=2, factor_dim=states_dim//2, tau=7)
+
+# Initial hidden causes and hidden state of the RNN
+c_init = torch.eye(p)
+h_init = torch.randn(1, rnn.states_dim).repeat(p, 1)
+c_init = c_init.unsqueeze(1).repeat(1, 20, 1).reshape(batch_size, p)
+h_init = h_init.unsqueeze(1).repeat(1, 20, 1).reshape(batch_size, rnn.states_dim)
+
+# Store the prediction errors throughout training
+errors = np.zeros(iterations)
+
+# Train the network
+for i in tqdm(range(iterations)):
+
+    # Learning rates
+    lr_o = 0.1/(2**(i//1000))
+    lr_r = 3
+
+    # Forward (prediction and inference) pass through the RNN
+    c = c_init.clone()
+    h = h_init.clone()
+    rnn.forward(traj, c, h, lr_c=0.0, lr_h=0.001)
+
+    # Learning
+    rnn.learn(lr_o, lr_r)
+
+    # Store the prediction error
+    errors[i] = torch.mean(rnn.error**2).item()
+
+plt.plot(errors)
+plt.yscale('log')
+plt.show()
+
+rnn.forward(torch.zeros(60, batch_size, 2), c_init.clone(), h_init.clone(), lr_c=0.0, lr_h=0.0)
+for k in range(p):
+    plt.figure()
+    plt.plot(rnn.x_pred[:, k*20, 0], rnn.x_pred[:, k*20, 1])
+    plt.show()
+
+# Misura RAM, CPU, tempo dopo
+ram_after = process.memory_info().rss / (1024 ** 2)
+cpu_after = psutil.cpu_percent(interval=None)
+t1 = time.time()
+
+# Calcola differenze
+ram_used = ram_after - ram_before
+cpu_used = cpu_after - cpu_before
+elapsed_time = t1 - t0
+
+# Stampa in console
+print(f"RAM usata: {ram_used:.2f} MB")
+print(f"CPU: {cpu_used:.2f} %")
+print(f"Tempo esecuzione: {elapsed_time:.2f} s")
+
+# Log su wandb
+wandb.log({
+    "RAM_MB": ram_used,
+    "CPU_usage": cpu_used,
+    "Execution_time_sec": elapsed_time
+})
+
+wandb.finish()
