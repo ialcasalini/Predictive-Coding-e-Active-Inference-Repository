@@ -1,0 +1,130 @@
+import numpy as np
+from tqdm import tqdm_notebook as tqdm
+from matplotlib import pyplot as plt
+import torch
+from torch import nn
+import pickle as pk
+import wandb
+import psutil
+import time
+import os
+import scipy.io as sio
+
+# Inizializza run di wandb
+wandb.init(project="handwriting-robot-GD", name="run-singola-cella-handwriting-robot-GD")
+
+# Misura RAM, CPU, tempo prima
+process = psutil.Process(os.getpid())
+ram_before = process.memory_info().rss / (1024 ** 2)  # in MB
+cpu_before = psutil.cpu_percent(interval=None)
+t0 = time.time()
+
+class RNN(nn.Module): # metodi init e forward ridimensionati e metodo learn cancellato
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(RNN, self).__init__()
+        self.hidden_dim = hidden_dim
+        # Pesi ricorrenti e input->hidden
+        self.W_hh = nn.Parameter(torch.randn(hidden_dim, hidden_dim) * (1/np.sqrt(hidden_dim)))
+        self.W_xh = nn.Parameter(torch.randn(input_dim, hidden_dim) * (1/np.sqrt(input_dim)))
+        # Peso hidden->output
+        self.W_ho = nn.Parameter(torch.randn(hidden_dim, output_dim) * (1/np.sqrt(hidden_dim)))
+
+    def forward(self, x, h_init):
+        # x: seq_len x batch_size x input_dim
+        seq_len, batch, _ = x.shape
+        h = torch.zeros(seq_len, batch, self.hidden_dim, device=x.device) # salvataggio degli stati nascosti della sequenza
+        y_pred = torch.zeros(seq_len, batch, self.W_ho.shape[1], device=x.device) # salvataggio delle predizioni della sequenza
+        h_prev = h_init # stato nascosto precedente = stato fornito
+        for t in range(seq_len):
+          # Calcola il nuovo stato nascosto combinando:
+          # 1. lo stato nascosto precedente tramite pesi ricorrenti (h_prev @ W_hh.T)
+          # 2. l'input corrente tramite pesi input->hidden (x[t] @ W_xh)
+          # Applica tanh per introdurre non-linearità
+            # h_t = tanh(h_{t-1} @ W_hh.T + x_t @ W_xh)
+            h_curr = torch.tanh(
+                h_prev @ self.W_hh.T
+                + x[t] @ self.W_xh
+            )
+            y_pred[t] = h_curr @ self.W_ho  # calcolo dell'output predetto al passo t a partire dallo stato nascosto
+            h[t] = h_curr
+            h_prev = h_curr
+
+        return y_pred, h
+
+# Caricamento e preprocessing dati (uguale a prima)
+from google.colab import files
+trajectories = files.upload()
+
+trajectories = sio.loadmat('mixoutALL_shifted.mat')['mixout'][0]
+trajectories = [traj[:, np.sum(np.abs(traj), 0) > 1e-3] for traj in trajectories]
+trajectories = [np.cumsum(traj, axis=-1) for traj in trajectories]
+traj_len = 60
+normalized = np.zeros((len(trajectories), 2, traj_len))
+for i, traj in enumerate(trajectories):
+    tlen = traj.shape[1]
+    for t in range(traj_len):
+        normalized[i, :, t] = traj[:2, int(t * tlen / traj_len)]
+trajectories = normalized / 10
+labels = [(0,97), (97,170), (170,225)]
+
+iterations = 2000 # iterazione di training (come con il PC nell'esempio originale)
+# dataset usato per il training = 20 traiettorie (come nell'esempio originale)
+p = 3
+batch_size = p * 20
+data = torch.cat([
+    torch.Tensor(trajectories[start:start+20])
+    for start, end in labels
+]).permute(2,0,1)  # seq_len x batch_size x 2
+
+# Modello
+model = RNN(input_dim=2, hidden_dim=100, output_dim=2)
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01) # enunciazione dello SGD
+loss_fn = nn.MSELoss()
+
+# Stato iniziale
+h_init = torch.zeros(batch_size, model.hidden_dim)
+errors = []
+
+# Training
+for i in tqdm(range(iterations)):
+    lr = 0.01 / (2 ** (i // 1000)) # dimezziamo il learning rate per stabilizzare l'apprendimento verso la fine e per la convergenza/precisione dei risultati
+    for pg in optimizer.param_groups:
+        pg['lr'] = lr
+
+    # ciclo chiave del GD
+    optimizer.zero_grad() # azzeramento dei parametri prima di ogni passo di backprop
+    y_pred, h = model.forward(data, h_init)
+    loss = loss_fn(y_pred, data)
+    loss.backward() # propagazione del loss lungo la rete
+    optimizer.step() # aggiornamento dei pesi
+    errors.append(loss.item())
+
+# Plot errori
+plt.plot(errors)
+plt.yscale('log')
+plt.show()
+'''
+# Test: predizioni a zero input
+zero_in = torch.zeros_like(data)
+y_pred, _ = model.forward(zero_in, h_init)
+'''
+for k in range(p):
+    plt.figure()
+    plt.plot(
+        y_pred[:, k*20, 0].detach().numpy(),
+        y_pred[:, k*20, 1].detach().numpy()
+    )
+    plt.title(f'Traiettoria classe {k}')
+    plt.show()
+
+# Misura risorse e log
+ram_after = process.memory_info().rss / (1024 ** 2)
+cpu_after = psutil.cpu_percent(interval=None)
+t1 = time.time()
+wandb.log({
+    "RAM_MB": ram_after - ram_before,
+    "CPU_percent": cpu_after,
+    "CPU_usage": cpu_after - cpu_before,
+    "Execution_time_sec": t1 - t0
+})
+wandb.finish()
