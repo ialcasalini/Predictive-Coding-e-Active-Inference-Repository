@@ -1,0 +1,108 @@
+# RUNTIME
+import numpy as np
+from scipy import stats
+
+# Liste di dati
+approach_GD = np.array([
+    90.6, 92.0, 91.1, 91.8, 91.5, 90.4, 93.8, 92.9, 92.0, 91.9,
+    80.7, 80.6, 79.6, 79.9, 80.5, 78.5, 80.1, 81.6, 79.7, 82.7
+])
+approach_PC = np.array([
+    245.0, 241.7, 239.3, 280.7, 398.1, 409.1, 404.0, 400.4, 416.5, 408.8,
+    485.0, 474.0, 483.5, 500.7, 518.8, 513.7, 506.0, 385.1, 370.6, 384.7
+])
+
+# Paired T-test
+t_statistic, p_value = stats.ttest_rel(approach_GD, approach_PC)
+
+print(f"t-statistic: {t_statistic:.4f}")
+print(f"p-value: {p_value:.6f}")
+
+alpha = 0.05
+if p_value < alpha:
+    print("Differenza statisticamente significativa")
+    print("Rifiutiamo H₀")
+else:
+    print("Nessuna evidenza di differenza significativa")
+    print("Non rifiutiamo H₀")
+
+
+# RAM USAGE
+import numpy as np
+from scipy import stats
+
+# Liste di dati
+approach_GD = np.array([-12.4, 10.5, 0.2, 17.9, -5.9, 6.7, -8.8, 28.8, 2.8, 0.125, 9.4, 2.1, 3.8, -6.3, 5.5, 0.8, 11.8, 8.1, 5.4, -10.7])
+
+approach_PC = np.array([39.4, 18.3, -0.3, 4.79, 49.3, -2.5, 1.98, 7.79, -17.12, 11.0, 20.41, 2.85, 3.23, 5.2, 15.2, 28.6, 5.6, 43.3, 7.11, 8.6])
+
+
+# Paired T-test
+t_statistic, p_value = stats.ttest_rel(approach_GD, approach_PC)
+
+print(f"t-statistic: {t_statistic:.4f}")
+print(f"p-value: {p_value:.6f}")
+
+alpha = 0.05
+if p_value < alpha:
+    print("Differenza statisticamente significativa")
+    print("Rifiutiamo H₀")
+else:
+    print("Nessuna evidenza di differenza significativa")
+    print("Non rifiutiamo H₀")
+
+
+# CPU USAGE
+import numpy as np
+from scipy import stats
+
+# Liste di dati
+approach_GD = np.array([39.6, 35.8, 36.9, 36.4, 36.8, 37.1, 48.1, 36.7, 36.8, 40.8, 52.3, 31.6, 38.8, 38.3, 47.3, 38.3, 38.4, 37.1, 39.3, 39.4])
+
+approach_PC = np.array([41.2, 43.4, 48.10, 50, 17.8, 3.4, 52.7, 52.4, 52.7, 49.3, 8.2, 52.0, 33.3, 50.7, 43.6, 52.6, 54, 19.9, 52.0, 49.9])
+
+# Paired T-test
+t_statistic, p_value = stats.ttest_rel(approach_GD, approach_PC)
+
+print(f"t-statistic: {t_statistic:.4f}")
+print(f"p-value: {p_value:.6f}")
+
+alpha = 0.05
+if p_value < alpha:
+    print("Differenza statisticamente significativa")
+    print("Rifiutiamo H₀")
+else:
+    print("Nessuna evidenza di differenza significativa")
+    print("Non rifiutiamo H₀")
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import t
+
+# Parametri
+df = 38
+t_stat = -14.86
+
+# Asse x
+x = np.linspace(-20, 20, 1000)
+y = t.pdf(x, df)
+
+# Grafico
+sns.set(style="whitegrid", context="talk")  # stile professionale
+plt.figure(figsize=(8,5))
+
+plt.plot(x, y, label=f't-distribution (df={df})', color='blue')
+plt.fill_between(x, 0, y, where=(x <= t_stat) | (x >= -t_stat), color='red', alpha=0.3, label='p-value region')
+
+plt.axvline(t_stat, color='red', linestyle='--', label=f't = {t_stat:.2f}')
+plt.axvline(-t_stat, color='red', linestyle='--')
+
+plt.title('test-t a coppie', fontsize=16)
+plt.xlabel('Valore t', fontsize=14)
+plt.ylabel('Densità di probabilità', fontsize=14)
+plt.legend(fontsize=12)
+#plt.tight_layout()
+plt.grid(axis='x')
+plt.show()
