@@ -1,0 +1,139 @@
+!pip install wandb psutil
+import wandb
+wandb.login()
+import numpy as np
+import wandb
+import psutil
+import time
+import os
+
+# Inizializza run di wandb
+wandb.init(project="monitoraggio-cella", name="run-singola-cella")
+
+# Misura RAM, CPU, tempo prima
+process = psutil.Process(os.getpid())
+ram_before = process.memory_info().rss / (1024 ** 2)  # in MB
+cpu_before = psutil.cpu_percent(interval=None)
+t0 = time.time()
+
+# Parameters
+input_size = 4
+hidden1_size = 6
+hidden2_size = 5
+output_size = 4
+samples = 1000
+lr_w = 0.005   # MODIFICA 2: abbassare il weight learning rate
+lr_x = 0.01    # MODIFICA 3: abbassare l'inference rate
+
+# Generate data
+id = np.eye(4)
+X = np.tile(id, (samples, 1))
+Y = np.roll(X, -1, axis=0)
+
+# Initialize weights
+W1 = np.random.randn(input_size, hidden1_size) * 0.1
+W2 = np.random.randn(hidden1_size, hidden2_size) * 0.1
+W3 = np.random.randn(hidden2_size, output_size) * 0.1
+
+# Activation (identity + optional nonlinearity)
+def activation(x): return x
+def d_activation(x): return np.ones_like(x)  # linear
+
+# Training loop
+for epoch in range(300):
+    for i in range(len(X)):
+        x0 = X[i]
+        y_target = Y[i]
+
+        # Initialize latent variables (states) with small random noise
+        '''
+        x1 = np.random.randn(hidden1_size)
+        x2 = np.random.randn(hidden2_size)
+        x3 = np.random.randn(output_size)
+        '''
+        # MODIFICA 1: Initialize latent variables (states) with predictions
+        # ogni layer è stimato con una predizione grezza (stima feedforward)
+        x1 = W1.T @ x0
+        x2 = W2.T @ x1
+        x3 = W3.T @ x2
+
+        for _ in range(20):  # Inference iterations
+        # predizione di cosa ogni liv. superiore deve essere a partire dal liv. inferiore
+            # Predictions
+            pred1 = W1.T @ x0
+            pred2 = W2.T @ x1
+            pred3 = W3.T @ x2
+
+            # Prediction errors
+            # confronto delle previsioni con lo stato attuale
+            eps1 = x1 - pred1
+            eps2 = x2 - pred2
+            eps3 = x3 - pred3
+
+            # Target error (supervision at output)
+            eps_out = y_target - x3
+
+            # Update latent states (gradient descent on local energy)
+            # x1,x2 si aggiornano propagando l'errore dall'alto tramite le sinapsi
+            # x3 si aggiorna usando l'errore supervisivo e l'errore predittivo
+            x3 += lr_x * (eps_out - eps3)
+            x2 += lr_x * (W3 @ eps3)
+            x1 += lr_x * (W2 @ eps2)
+
+        # Update weights (Hebbian-like: pre x post error)
+        # prodotto esterno per aggiornare il peso in base all'errore
+        W3 += lr_w * np.outer(x2, eps_out)
+        W2 += lr_w * np.outer(x1, eps2)
+        W1 += lr_w * np.outer(x0, eps1)
+
+# Prediction
+def predict(x_input):
+    x1 = W1.T @ x_input
+    x2 = W2.T @ x1
+    x3 = W3.T @ x2
+    return (x3 > 0.5).astype(int)  # binary threshold
+
+# Test
+X_test = id
+Y_pred = np.array([predict(x) for x in X_test])
+Y_expected = np.roll(X_test, -1, axis=0)
+
+# Correct the generation of X_test200 to match the input size
+X_test200 = np.tile(id, (50, 1)) # 50 * 4 = 200 rows
+Y_pred200 = np.array([predict(x) for x in X_test200])
+
+# Calculate the expected output for the 200-row test set
+Y_expected200 = np.roll(X_test200, -1, axis=0)
+
+# Calculate the correctness by comparing predicted and expected outputs
+correct_predictions = np.sum(np.all(Y_pred200 == Y_expected200, axis=1))
+total_predictions = Y_pred200.shape[0]
+accuracy = (correct_predictions / total_predictions) * 100
+
+# Misura RAM, CPU, tempo dopo
+ram_after = process.memory_info().rss / (1024 ** 2)
+cpu_after = psutil.cpu_percent(interval=None)
+t1 = time.time()
+
+# Calcola differenze
+ram_used = ram_after - ram_before
+cpu_used = cpu_after
+elapsed_time = t1 - t0
+
+# Stampa in console
+print(f"RAM usata: {ram_used:.2f} MB")
+print(f"CPU: {cpu_used:.2f} %")
+print(f"Tempo esecuzione: {elapsed_time:.2f} s")
+
+print("Predicted:\n", Y_pred)
+print("Expected:\n", Y_expected)
+print(f"\nCorrectness of the prediction on 200 rows: {accuracy:.2f}%")
+
+# Log su wandb
+wandb.log({
+    "RAM_MB": ram_used,
+    "CPU_percent": cpu_used,
+    "Execution_time_sec": elapsed_time
+})
+
+wandb.finish()
