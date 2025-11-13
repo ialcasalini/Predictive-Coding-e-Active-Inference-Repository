@@ -1,0 +1,136 @@
+import numpy as np
+import wandb
+import psutil
+import time
+import os
+
+# Inizializza run di wandb
+wandb.init(project="monitoraggio-cella-MLP", name="run-singola-cella-MLP")
+
+# Misura RAM, CPU, tempo prima
+process = psutil.Process(os.getpid())
+ram_before = process.memory_info().rss / (1024 ** 2)  # in MB
+cpu_before = psutil.cpu_percent(interval=None)
+t0 = time.time()
+
+# Parameters
+input_size = 4
+hidden1_size = 6
+hidden2_size = 5
+output_size = 4
+samples = 1000
+lr = 0.01
+epochs = 300
+
+# Generate data
+id = np.eye(4)
+X = np.tile(id, (samples, 1))
+Y = np.roll(X, -1, axis=0)
+
+# Activation functions
+def relu(x): return np.maximum(0, x) # per la non linearità
+def d_relu(x): return (x > 0).astype(float)
+
+def sigmoid(x): return 1 / (1 + np.exp(-x)) # per normalizzare i risultati
+def d_sigmoid(x): s = sigmoid(x); return s * (1 - s)
+
+# Initialize weights
+W1 = np.random.randn(input_size, hidden1_size) * 0.1
+b1 = np.zeros(hidden1_size)
+
+W2 = np.random.randn(hidden1_size, hidden2_size) * 0.1
+b2 = np.zeros(hidden2_size)
+
+W3 = np.random.randn(hidden2_size, output_size) * 0.1
+b3 = np.zeros(output_size)
+
+# Training loop
+for epoch in range(epochs):
+    for i in range(len(X)):
+        x = X[i]
+        y = Y[i]
+
+        # Forward pass
+        z1 = x @ W1 + b1
+        a1 = relu(z1)
+
+        z2 = a1 @ W2 + b2
+        a2 = relu(z2)
+
+        z3 = a2 @ W3 + b3
+        a3 = sigmoid(z3)
+
+        # Backpropagation
+        dz3 = (a3 - y) * d_sigmoid(z3)
+        dW3 = np.outer(a2, dz3)
+        db3 = dz3
+
+        dz2 = (W3 @ dz3) * d_relu(z2)
+        dW2 = np.outer(a1, dz2)
+        db2 = dz2
+
+        dz1 = (W2 @ dz2) * d_relu(z1)
+        dW1 = np.outer(x, dz1)
+        db1 = dz1
+
+        # Gradient descent update
+        W3 -= lr * dW3
+        b3 -= lr * db3
+
+        W2 -= lr * dW2
+        b2 -= lr * db2
+
+        W1 -= lr * dW1
+        b1 -= lr * db1
+
+# Prediction
+def predict(x_input):
+    a1 = relu(x_input @ W1 + b1)
+    a2 = relu(a1 @ W2 + b2)
+    a3 = sigmoid(a2 @ W3 + b3)
+    return (a3 > 0.5).astype(int)
+
+# Test
+X_test = id
+Y_pred = np.array([predict(x) for x in X_test])
+Y_expected = np.roll(X_test, -1, axis=0)
+
+# Correct the generation of X_test200 to match the input size
+X_test200 = np.tile(id, (50, 1)) # 50 * 4 = 200 rows
+Y_pred200 = np.array([predict(x) for x in X_test200])
+
+# Calculate the expected output for the 200-row test set
+Y_expected200 = np.roll(X_test200, -1, axis=0)
+
+# Calculate the correctness by comparing predicted and expected outputs
+correct_predictions = np.sum(np.all(Y_pred200 == Y_expected200, axis=1))
+total_predictions = Y_pred200.shape[0]
+accuracy = (correct_predictions / total_predictions) * 100
+
+# Misura RAM, CPU, tempo dopo
+ram_after = process.memory_info().rss / (1024 ** 2)
+cpu_after = psutil.cpu_percent(interval=None)
+t1 = time.time()
+
+# Calcola differenze
+ram_used = ram_after - ram_before
+cpu_used = cpu_after
+elapsed_time = t1 - t0
+
+# Stampa in console
+print(f"RAM usata: {ram_used:.2f} MB")
+print(f"CPU: {cpu_used:.2f} %")
+print(f"Tempo esecuzione: {elapsed_time:.2f} s")
+
+print("Predicted (first 4 rows):\n", Y_pred)
+print("Expected (first 4 rows):\n", Y_expected)
+print(f"\nCorrectness of the prediction on 200 rows: {accuracy:.2f}%")
+
+# Log su wandb
+wandb.log({
+    "RAM_MB": ram_used,
+    "CPU_percent": cpu_used,
+    "Execution_time_sec": elapsed_time
+})
+
+wandb.finish()
